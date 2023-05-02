@@ -1,10 +1,9 @@
-name: Preview (build)
+name: Preview (build and deploy)
 on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
     paths-ignore:
       - 'microsite/**'
-      - '*.md'
 
 jobs:
   build-backstage:
@@ -65,14 +64,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           push: true
-
-  render-compose-file:
-    name: Render Docker Compose File
+  
+  deploy-uffizzi-preview:
+    name: Preview on Uffizzi
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    needs:
+    needs: 
       - build-backstage
-    outputs:
-      compose-file-cache-key: ${{ steps.hash.outputs.hash }}
     steps:
       - name: Checkout git repo
         uses: actions/checkout@v3
@@ -83,28 +81,40 @@ jobs:
           # Render simple template from environment variables.
           envsubst '$BACKSTAGE_IMAGE' < .github/uffizzi/docker-compose.uffizzi.yml > docker-compose.rendered.yml
           cat docker-compose.rendered.yml
-      - name: Upload Rendered Compose File as Artifact
-        uses: actions/upload-artifact@v3
+      - name: Deploy preview
+        id: preview
+        uses: UffizziCloud/preview-action@master
         with:
-          name: preview-spec
-          path: docker-compose.rendered.yml
-          retention-days: 2
-      - name: Upload PR Event as Artifact
-        uses: actions/upload-artifact@v3
+          compose-file: 'docker-compose.rendered.yml'
+          username: user@uffizzi.com
+          server: https://temp-2022-04.uffizzicloud.com/
+          project: default
+          password: ${{ secrets.UFFIZZI_PASSWORD }}
+      - name: Check outputs
+        run: echo "${{ steps.preview.outputs.id }} at ${{ steps.preview.outputs.url }}"
+      - name: Confirm Successful Preview Deployment
+        uses: docker://curlimages/curl:7.82.0
         with:
-          name: preview-spec
-          path: ${{ github.event_path }}
-          retention-days: 2
+          args: --retry 5 --retry-all-errors --retry-delay 0 --fail --location ${{ steps.preview.outputs.url }}
 
-  delete-preview:
-    name: Call for Preview Deletion
-    runs-on: ubuntu-latest
-    if: ${{ github.event.action == 'closed' }}
-    steps:
-      # If this PR is closing, we will not render a compose file nor pass it to the next workflow.
-      - name: Upload PR Event as Artifact
-        uses: actions/upload-artifact@v3
+      # If PR, put image tags in the PR comments
+      - name: Find comment for deployment URL
+        uses: peter-evans/find-comment@v1
+        if: github.event_name == 'pull_request'
+        id: fc
         with:
-          name: preview-spec
-          path: ${{ github.event_path }}
-          retention-days: 2
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: Uffizzi Preview deployed
+      - name: Create or update comment for deployment URL
+        uses: peter-evans/create-or-update-comment@v1
+        if: github.event_name == 'pull_request'
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            Uffizzi Preview deployed:
+            ${{ steps.preview.outputs.url }}
+
+            Uffizzi Preview ID: `${{ steps.preview.outputs.id }}`
+          edit-mode: replace
